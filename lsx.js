@@ -20,43 +20,73 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
+import { Worker, isMainThread, parentPort } from "worker_threads";
+import { readFileSync, writeFileSync } from "fs";
 import repository, * as vivid from "vivid";
-import { readFileSync } from "fs";
+import { fileURLToPath } from "url";
 import { spawnSync } from "child_process";
+import { basename } from "path";
 import { JSDOM } from "jsdom";
 
 const [lsx, ...resources] = process.argv.slice(2); // 1st node.js, 2nd this file
 
-const script = readFileSync(lsx, "utf8");
-const binary = vivid.Compile(script);
-const program = vivid.Read(binary);
+// *****************************************************************************
 
-const outputs = []; // optional, populated by prompts
-const prompts = Object
-    .keys(process.env)
-    .filter(a => a.startsWith("LSX_PROMPT_"))
-    .map(a =>
-        [a.replace("LSX_PROMPT_", "").toLowerCase(),
-        function prompt(...args) {
-            const input = JSON.stringify(this); // stdin
-            const { stdout, stderr } = spawnSync(process.env[a], args, { input });
+if (isMainThread) {
+    const startTime = new Date().getTime();
+    const _filename = fileURLToPath(import.meta.url);
 
-            outputs.push({
-                prompt: a,
-                args,
-                output: stdout.toString(),
-                error: stderr.toString(),
-                input: this,
-            });
-        }]
-    );
+    function elapsedTime() {
+        const ts = new Date().getTime() - startTime;
 
-vivid.Config(Object.fromEntries(prompts));
+        process.stdout.write(`\r${Number(ts / 1000).toFixed(3)} sec(s)`);
+    }
 
-for (const r of resources) {
-    vivid.Setup({ document: (await JSDOM.fromFile(r)).window.document });
+    const loader = setInterval(elapsedTime, 1);
+    const worker = new Worker(_filename, { argv: [lsx, ...resources] });
 
-    for (const _ of vivid.Interpret(program));
+    worker.on("message", data => {
+        clearInterval(loader);
+        process.stdout.write(` — done\n`);
+        writeFileSync(basename(lsx) + ".json", JSON.stringify(data, null, 2));
+    });
 }
 
-process.stdout.write(JSON.stringify([repository, ...outputs], null, 2));
+// *****************************************************************************
+
+else {
+    const script = readFileSync(lsx, "utf8");
+    const binary = vivid.Compile(script);
+    const program = vivid.Read(binary);
+
+    const outputs = []; // optional, populated by prompts
+    const prompts = Object
+        .keys(process.env)
+        .filter(a => a.startsWith("LSX_PROMPT_"))
+        .map(a =>
+            [a.replace("LSX_PROMPT_", "").toLowerCase(),
+            function prompt(...args) {
+                const cmd = process.env[a];
+                const input = JSON.stringify(this); // stdin
+                const { stdout, stderr } = spawnSync(cmd, args, { input });
+
+                outputs.push({
+                    prompt: a,
+                    output: stdout.toString(),
+                    error: stderr.toString(),
+                    input: this,
+                    args
+                });
+            }]
+        );
+
+    vivid.Config(Object.fromEntries(prompts));
+
+    for (const r of resources) {
+        vivid.Setup({ document: (await JSDOM.fromFile(r)).window.document });
+
+        for (const _ of vivid.Interpret(program));
+    }
+
+    parentPort.postMessage([repository, ...outputs]);
+}
